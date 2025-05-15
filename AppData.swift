@@ -212,7 +212,7 @@ class AppData: ObservableObject {
         
         uploadTask.resume()
     }
-
+    
     func downloadProfileImage(forCycleId cycleId: UUID, completion: @escaping (UIImage?) -> Void) {
         // First try to get from local cache
         if let localImage = loadProfileImage(forCycleId: cycleId) {
@@ -266,15 +266,15 @@ class AppData: ObservableObject {
     }
     
     private var dataRefreshObservers: [UUID: () -> Void] = [:]
-
+    
     func addDataRefreshObserver(id: UUID, handler: @escaping () -> Void) {
         dataRefreshObservers[id] = handler
     }
-
+    
     func removeDataRefreshObserver(id: UUID) {
         dataRefreshObservers.removeValue(forKey: id)
     }
-
+    
     func notifyDataRefreshObservers() {
         DispatchQueue.main.async {
             for handler in self.dataRefreshObservers.values {
@@ -301,18 +301,64 @@ class AppData: ObservableObject {
         UserDefaults.standard.set(userId.uuidString, forKey: "currentUserId")
         return user
     }
-
-
+    
+    
     func linkUserToFirebaseAuth(user: User, authId: String) {
-        guard let dbRef = dbRef else { return }
+        let dbRef = Database.database().reference()
+        
+        print("AppData: Linking user \(user.id) to Firebase Auth ID \(authId)")
         
         // Create a mapping between Firebase Auth UID and our app's UUID
         dbRef.child("auth_mapping").child(authId).setValue(user.id.uuidString)
         
-        // Add Firebase Auth ID to user record
-        dbRef.child("users").child(user.id.uuidString).child("authId").setValue(authId)
+        // Also add Firebase Auth ID directly to user record
+        dbRef.child("users").child(user.id.uuidString).updateChildValues([
+            "authId": authId
+        ]) { error, _ in
+            if let error = error {
+                print("Error adding authId to user: \(error.localizedDescription)")
+            } else {
+                print("Successfully added authId to user \(user.id)")
+            }
+        }
     }
 
+
+    func forceRefreshCurrentUser(completion: (() -> Void)? = nil) {
+           guard let userId = currentUser?.id.uuidString else {
+               print("AppData: Cannot refresh user - no user ID")
+               completion?()
+               return
+           }
+           
+           print("AppData: Force refreshing user data for \(userId)")
+           let dbRef = Database.database().reference()
+           
+           dbRef.child("users").child(userId).observeSingleEvent(of: .value) { [weak self] snapshot in
+               if let userData = snapshot.value as? [String: Any],
+                  let user = User(dictionary: userData) {
+                   
+                   print("AppData: Refreshed user data with plan: \(user.subscriptionPlan ?? "none"), limit: \(user.roomLimit)")
+                   
+                   DispatchQueue.main.async {
+                       self?.currentUser = user
+                       self?.objectWillChange.send()
+                       
+                       // Notify any observers
+                       NotificationCenter.default.post(
+                           name: Notification.Name("ForceUIRefresh"),
+                           object: nil
+                       )
+                       
+                       completion?()
+                   }
+               } else {
+                   print("AppData: Failed to refresh user data")
+                   completion?()
+               }
+           }
+       }
+    
     func getUserByAuthId(authId: String, completion: @escaping (User?) -> Void) {
         guard let dbRef = dbRef else {
             completion(nil)
