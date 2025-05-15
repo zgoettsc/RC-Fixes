@@ -314,57 +314,31 @@ struct InitialRoomsAndSubscriptionsView: View {
         }
         .navigationTitle("")
         .navigationBarHidden(true)
-        .onAppear {
-            // Check if we should show the onboarding (first-time user)
-            if !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
-                // Delay slightly to allow the view to fully appear first
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    showOnboarding = true
-                }
-            }
+        // On appear
+        .onAppear(perform: onAppearSetup)
+        // Handle subscription notifications
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("SubscriptionUpdated"))) { _ in
+            print("InitialRoomsView: Received SubscriptionUpdated notification, refreshing data")
             
-            // Fetch current user data
-            fetchUserData()
-            // Check if we have valid auth and user data
-            if let currentUser = Auth.auth().currentUser {
-                print("Firebase Auth user is logged in: \(currentUser.uid)")
-                
-                // If we have an authId but no appData.currentUser, try to fetch user data
-                if appData.currentUser == nil {
-                    let dbRef = Database.database().reference()
-                    dbRef.child("auth_mapping").child(currentUser.uid).observeSingleEvent(of: .value) { snapshot in
-                        if let userIdString = snapshot.value as? String {
-                            print("Found user mapping: \(userIdString)")
-                            dbRef.child("users").child(userIdString).observeSingleEvent(of: .value) { userSnapshot in
-                                if let userData = userSnapshot.value as? [String: Any],
-                                   let user = User(dictionary: userData) {
-                                    DispatchQueue.main.async {
-                                        self.appData.currentUser = user
-                                        print("Successfully retrieved user data: \(user.name)")
-                                        self.loadAvailableRooms()
-                                        self.loadUserSubscriptionStatus()
-                                    }
-                                } else {
-                                    print("Failed to parse user data")
-                                }
-                            }
-                        } else {
-                            print("No user mapping found for auth ID: \(currentUser.uid)")
-                        }
-                    }
-                } else {
-                    loadAvailableRooms()
-                    loadUserSubscriptionStatus()
-                }
-            } else {
-                print("No Firebase Auth user logged in")
-            }
-            // Check if we have valid auth and user data
-            if let currentUser = Auth.auth().currentUser {
-                print("Firebase Auth user is logged in: \(currentUser.uid)")
-                // Rest of your existing code...
+            // Then fetch fresh data with a slight delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.fetchUserData()
+                self.loadUserSubscriptionStatus()
+                self.loadAvailableRooms()
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ForceUIRefresh"))) { _ in
+            print("InitialRoomsView: Received ForceUIRefresh notification")
+        }
+        // Handle room actions
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("RoomLeft"))) { _ in
+            loadAvailableRooms()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("RoomDeleted"))) { _ in
+            loadAvailableRooms()
+            loadUserSubscriptionStatus()
+        }
+        // Handle sheets
         .sheet(isPresented: $showingJoinRoom) {
             JoinRoomView(appData: appData)
                 .onDisappear {
@@ -389,6 +363,10 @@ struct InitialRoomsAndSubscriptionsView: View {
                 loadUserSubscriptionStatus()
             }
         }
+        .fullScreenCover(isPresented: $showOnboarding) {
+            OnboardingView(isShowingOnboarding: $showOnboarding)
+        }
+        // Handle alerts
         .alert(isPresented: $showingDeleteAlert) {
             Alert(
                 title: Text("Delete Room"),
@@ -433,23 +411,61 @@ struct InitialRoomsAndSubscriptionsView: View {
                 secondaryButton: .cancel()
             )
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("SubscriptionUpdated"))) { _ in
-            loadUserSubscriptionStatus()
-            loadAvailableRooms()
+    }
+    
+    // MARK: - Methods
+    
+    private func onAppearSetup() {
+        // Check if we should show the onboarding (first-time user)
+        if !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
+            // Delay slightly to allow the view to fully appear first
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                showOnboarding = true
+            }
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("RoomLeft"))) { _ in
-            loadAvailableRooms()
+        
+        // Force refresh user data when view appears
+        appData.forceRefreshCurrentUser {
+            self.loadUserSubscriptionStatus()
+            self.loadAvailableRooms()
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("RoomDeleted"))) { _ in
-            loadAvailableRooms()
-            loadUserSubscriptionStatus()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("SubscriptionUpdated"))) { _ in
-            print("Subscription updated notification received, refreshing user data")
-            fetchUserData()
-        }
-        .fullScreenCover(isPresented: $showOnboarding) {
-            OnboardingView(isShowingOnboarding: $showOnboarding)
+        
+        // Fetch current user data
+        fetchUserData()
+        
+        // Check if we have valid auth and user data
+        if let currentUser = Auth.auth().currentUser {
+            print("Firebase Auth user is logged in: \(currentUser.uid)")
+            
+            // If we have an authId but no appData.currentUser, try to fetch user data
+            if appData.currentUser == nil {
+                let dbRef = Database.database().reference()
+                dbRef.child("auth_mapping").child(currentUser.uid).observeSingleEvent(of: .value) { snapshot in
+                    if let userIdString = snapshot.value as? String {
+                        print("Found user mapping: \(userIdString)")
+                        dbRef.child("users").child(userIdString).observeSingleEvent(of: .value) { userSnapshot in
+                            if let userData = userSnapshot.value as? [String: Any],
+                               let user = User(dictionary: userData) {
+                                DispatchQueue.main.async {
+                                    self.appData.currentUser = user
+                                    print("Successfully retrieved user data: \(user.name)")
+                                    self.loadAvailableRooms()
+                                    self.loadUserSubscriptionStatus()
+                                }
+                            } else {
+                                print("Failed to parse user data")
+                            }
+                        }
+                    } else {
+                        print("No user mapping found for auth ID: \(currentUser.uid)")
+                    }
+                }
+            } else {
+                loadAvailableRooms()
+                loadUserSubscriptionStatus()
+            }
+        } else {
+            print("No Firebase Auth user logged in")
         }
     }
     
@@ -566,24 +582,40 @@ struct InitialRoomsAndSubscriptionsView: View {
     }
     
     func loadUserSubscriptionStatus() {
-        let dbRef = Database.database().reference()
-        
+        print("InitialRoomsView: Loading subscription status")
         guard let user = appData.currentUser else {
+            print("InitialRoomsView: No current user found")
             return
         }
         
         let userId = user.id.uuidString
+        let dbRef = Database.database().reference()
         
+        print("InitialRoomsView: Loading subscription status for user \(userId)")
+        
+        // Use direct string instead of checking optionality
         dbRef.child("users").child(userId).observeSingleEvent(of: .value) { snapshot, _ in
             if let userData = snapshot.value as? [String: Any] {
                 var updatedUser = user
-                updatedUser.subscriptionPlan = userData["subscriptionPlan"] as? String
-                updatedUser.roomLimit = userData["roomLimit"] as? Int ?? 0
+                
+                // Extract subscription data
+                let subscriptionPlan = userData["subscriptionPlan"] as? String
+                let roomLimit = userData["roomLimit"] as? Int ?? 0
+                let ownedRooms = userData["ownedRooms"] as? [String]
+                
+                print("InitialRoomsView: Loaded subscription data - plan: \(subscriptionPlan ?? "none"), limit: \(roomLimit)")
+                
+                updatedUser.subscriptionPlan = subscriptionPlan
+                updatedUser.roomLimit = roomLimit
+                updatedUser.ownedRooms = ownedRooms
                 
                 DispatchQueue.main.async {
                     self.appData.currentUser = updatedUser
-                    print("Updated user with plan: \(updatedUser.subscriptionPlan ?? "none"), limit: \(updatedUser.roomLimit)")
+                    print("InitialRoomsView: Updated current user with subscription data")
+                    self.loadAvailableRooms()
                 }
+            } else {
+                print("InitialRoomsView: No user data found for ID: \(userId)")
             }
         }
     }
@@ -673,6 +705,7 @@ struct InitialRoomsAndSubscriptionsView: View {
             }
         }
     }
+    
     private func signOut() {
         // Sign out from Firebase Auth
         do {
