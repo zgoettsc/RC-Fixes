@@ -94,7 +94,7 @@ class StoreManager: NSObject, ObservableObject {
     }
     
     func buyProduct(_ package: Package, completion: @escaping (Bool, String?) -> Void = { _, _ in }) {
-        print("Initiating purchase for package: \(package.identifier)")
+        print("Initiating purchase for package: \(package.identifier)...")
         self.isLoading = true
         
         Purchases.shared.purchase(package: package) { [weak self] transaction, purchaserInfo, error, userCancelled in
@@ -114,7 +114,28 @@ class StoreManager: NSObject, ObservableObject {
                 
                 if let purchaserInfo = purchaserInfo {
                     print("Purchase successful")
+                    
+                    // Process the subscription change
                     self?.processSubscriptionChange(purchaserInfo: purchaserInfo)
+                    
+                    // Additional notifications to ensure UI updates
+                    NotificationCenter.default.post(
+                        name: Notification.Name("ForceUIRefresh"),
+                        object: nil
+                    )
+                    
+                    // Post a delayed notification as fallback
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        NotificationCenter.default.post(
+                            name: Notification.Name("SubscriptionUpdated"),
+                            object: nil
+                        )
+                        NotificationCenter.default.post(
+                            name: Notification.Name("ForceUIRefresh"),
+                            object: nil
+                        )
+                    }
+                    
                     completion(true, nil)
                 } else {
                     completion(false, "Unknown error occurred")
@@ -197,32 +218,84 @@ class StoreManager: NSObject, ObservableObject {
         
         self.currentSubscriptionPlan = newPlan
         
-        // Update Firebase Database
+        // First check for direct mapping
         if let userId = Auth.auth().currentUser?.uid {
             let database = Database.database().reference()
-            database.child("users").queryOrdered(byChild: "authId").queryEqual(toValue: userId).observeSingleEvent(of: .value) { snapshot in
-                if snapshot.exists(), let userData = snapshot.value as? [String: [String: Any]], let userKey = userData.keys.first {
-                    database.child("users").child(userKey).updateChildValues([
-                        "subscriptionPlan": newPlan.rawValue,
-                        "roomLimit": roomLimit
-                    ]) { error, _ in
-                        if let error = error {
-                            print("Error updating user subscription: \(error)")
+            
+            // First check for direct mapping
+            database.child("auth_mapping").child(userId).observeSingleEvent(of: .value) { snapshot in
+                if let userIdString = snapshot.value as? String {
+                    // Found direct mapping
+                    self.updateUserSubscription(userIdString: userIdString, plan: newPlan, limit: roomLimit)
+                } else {
+                    // Try to find user by authId field
+                    database.child("users").queryOrdered(byChild: "authId").queryEqual(toValue: userId)
+                        .observeSingleEvent(of: .value) { snapshot in
+                        if snapshot.exists(), let userData = snapshot.value as? [String: [String: Any]],
+                           let userKey = userData.keys.first {
+                            // Found via query
+                            self.updateUserSubscription(userIdString: userKey, plan: newPlan, limit: roomLimit)
                         } else {
-                            print("Successfully updated user subscription to \(newPlan.rawValue) with limit \(roomLimit)")
-                            NotificationCenter.default.post(
-                                name: Notification.Name("SubscriptionUpdated"),
-                                object: nil,
-                                userInfo: ["plan": newPlan.rawValue, "limit": roomLimit]
-                            )
+                            print("User not found in database by authId")
                         }
                     }
-                } else {
-                    print("User not found in database")
                 }
             }
         } else {
             print("No authenticated user")
+        }
+    }
+    
+    private func updateUserSubscription(userIdString: String, plan: SubscriptionPlan, limit: Int) {
+        let database = Database.database().reference()
+        database.child("users").child(userIdString).updateChildValues([
+            "subscriptionPlan": plan.rawValue,
+            "roomLimit": limit
+        ]) { error, _ in
+            if let error = error {
+                print("Error updating user subscription: \(error)")
+            } else {
+                print("Successfully updated user subscription to \(plan.rawValue) with limit \(limit)")
+                
+                // Post notifications with different delays to ensure UI updates
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: Notification.Name("SubscriptionUpdated"),
+                        object: nil,
+                        userInfo: [
+                            "plan": plan.rawValue,
+                            "limit": limit,
+                            "userIdString": userIdString
+                        ]
+                    )
+                    
+                    NotificationCenter.default.post(
+                        name: Notification.Name("ForceUIRefresh"),
+                        object: nil
+                    )
+                }
+                
+                // Additional delayed notifications as fallback
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    NotificationCenter.default.post(
+                        name: Notification.Name("SubscriptionUpdated"),
+                        object: nil
+                    )
+                }
+                
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    NotificationCenter.default.post(
+                        name: Notification.Name("ForceUIRefresh"),
+                        object: nil
+                    )
+                    
+                    // Force dismiss of SubscriptionManagementView
+                    NotificationCenter.default.post(
+                        name: Notification.Name("DismissSubscriptionView"),
+                        object: nil
+                    )
+                }
+            }
         }
     }
 }
