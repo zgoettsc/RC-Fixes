@@ -222,7 +222,24 @@ struct SubscriptionManagementView: View {
         }
         .onAppear {
             storeManager.requestProducts()
+            
+            // Force refresh user data when view appears
+            appData.forceRefreshCurrentUser {
+                loadUserSubscriptionStatus()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("SubscriptionUpdated"))) { notification in
+            print("SubscriptionManagementView received SubscriptionUpdated notification")
             loadUserSubscriptionStatus()
+            
+            // Give a moment for data to update, then dismiss
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                dismiss()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("DismissSubscriptionView"))) { _ in
+            print("SubscriptionManagementView received dismiss notification")
+            dismiss()
         }
     }
     
@@ -233,14 +250,23 @@ struct SubscriptionManagementView: View {
             isProcessing = false
             if success {
                 print("Purchase successful for \(package.identifier)")
-                loadUserSubscriptionStatus()
                 
-                // Post notification about subscription change
-                NotificationCenter.default.post(
-                    name: Notification.Name("SubscriptionUpdated"),
-                    object: nil,
-                    userInfo: ["productId": package.storeProduct.productIdentifier]
-                )
+                // Forcefully refresh subscription status and UI
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    self.loadUserSubscriptionStatus()
+                    
+                    // Post notification about subscription change
+                    NotificationCenter.default.post(
+                        name: Notification.Name("SubscriptionUpdated"),
+                        object: nil,
+                        userInfo: ["productId": package.storeProduct.productIdentifier]
+                    )
+                    
+                    // Dismiss this view after a short delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        self.dismiss()
+                    }
+                }
             } else if let error = error {
                 print("Purchase failed: \(error)")
                 errorMessage = error
@@ -253,21 +279,36 @@ struct SubscriptionManagementView: View {
         let dbRef = Database.database().reference()
         
         guard let user = appData.currentUser else {
+            print("SubscriptionView: No current user found")
             return
         }
         
         // Use direct string instead of checking optionality
         let userId = user.id.uuidString
+        print("SubscriptionView: Loading subscription status for \(userId)")
         
-        dbRef.child("users").child(userId).observeSingleEvent(of: .value) { snapshot in
+        dbRef.child("users").child(userId).observeSingleEvent(of: .value) { snapshot, _ in
             if let userData = snapshot.value as? [String: Any] {
                 var updatedUser = user
                 updatedUser.subscriptionPlan = userData["subscriptionPlan"] as? String
                 updatedUser.roomLimit = userData["roomLimit"] as? Int ?? 0
                 
+                print("SubscriptionView: Found user data with plan: \(updatedUser.subscriptionPlan ?? "none"), limit: \(updatedUser.roomLimit)")
+                
                 DispatchQueue.main.async {
                     self.appData.currentUser = updatedUser
+                    
+                    // Force the appData to update its publishers
+                    self.appData.objectWillChange.send()
+                    
+                    // Also update parent views
+                    NotificationCenter.default.post(
+                        name: Notification.Name("ForceUIRefresh"),
+                        object: nil
+                    )
                 }
+            } else {
+                print("SubscriptionView: No user data found for \(userId)")
             }
         }
     }
